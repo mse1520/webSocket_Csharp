@@ -15,27 +15,44 @@ namespace webSocketTestConsole
     {
         static void Main(string[] args)
         {
+        reTry:
+            try
+            {
+                var webSocketStomp = new WebSocketStomp("localhost:8080/ws");
 
-            Uri uri = new Uri("ws://localhost:8080/ws/websocket");
-            WebSocketStomp webSocketStomp = new WebSocketStomp(uri);
+                webSocketStomp.onMessage((header, data, err) =>
+                {
+                    if (err != null) throw err;
+                    Console.WriteLine(header);
+                    Console.WriteLine(data);
+                });
 
-            webSocketStomp.onMessage((header, data) => {
-                Console.WriteLine(data);
-            });
+                webSocketStomp.subscribeSync("/topic/data/1/particle");
 
-            webSocketStomp.subscribSync("/topic/request/scaleData");
+                while (true)
+                {
+                    var data = new JObject();
+                    data.Add("command", "SEND");
+                    data.Add("message", "테스트!!");
+                    var dataText = JsonConvert.SerializeObject(data);
 
-            var data = new JObject();
-            data.Add("command", "SEND");
-            data.Add("message", "I love JH!!!");
-            var dataText = JsonConvert.SerializeObject(data);
+                    webSocketStomp.sendSync("/data/1/particle", JsonConvert.SerializeObject(data));
 
-            webSocketStomp.sendSync("/request/scaleData", dataText);
+                    Task.Delay(2000, CancellationToken.None).Wait();
+                }
+            }
+            catch(Exception e)
+            {
+                Console.WriteLine(e.ToString());
+
+                bool returnCheck = true;
+                try { Task.Delay(1000, CancellationToken.None).Wait(); }
+                catch (Exception) { returnCheck = false; }
+                if (returnCheck) goto reTry;
+            }
 
             Console.ReadLine();
         }
-
-        
     }
 
     public class WebSocketStomp
@@ -43,6 +60,7 @@ namespace webSocketTestConsole
         #region ★ 멤버 변수
         private Guid uuid = Guid.NewGuid();
         private ClientWebSocket ws = new ClientWebSocket();
+        
         // task 취소 토큰
         private CancellationTokenSource cts = new CancellationTokenSource();
 
@@ -50,12 +68,31 @@ namespace webSocketTestConsole
         #endregion
 
         #region ★ 생성자 & 소멸자
-        public WebSocketStomp(Uri uri)
+        public WebSocketStomp(string url)
         {
-            connectSync(uri);
+            connectSync(url);
         }
 
         ~WebSocketStomp()
+        {
+            dispose();
+        }
+        #endregion
+
+        #region ★ 공통
+        private void wrapingFunc(Action callback)
+        {
+            try
+            {
+                callback();
+            }
+            catch(Exception e)
+            {
+                throw new Exception(e.Message);
+            }
+        }
+
+        public void dispose()
         {
             cts.Cancel();
             cts.Dispose();
@@ -64,63 +101,75 @@ namespace webSocketTestConsole
         #endregion
 
         #region ★ 동기 실행
-        private void connectSync(Uri uri)
+        private void connectSync(string url)
         {
-            ws.ConnectAsync(uri, cts.Token).Wait(timeout);
-            
-            var buf = new StringBuilder();
+            wrapingFunc(() => {
+                // 웹소켓 연결
+                var uri = new Uri($"ws://{url}/websocket");
+                var conResult = ws.ConnectAsync(uri, cts.Token).Wait(timeout);
+                
+                // 유효성 검사
+                if (!conResult) throw new Exception("WebSocket connect error!!");
 
-            buf.Append("CONNECT\n");
-            buf.Append("content-length:0\n");
-            buf.Append("accept-version:1.2\n");
-            buf.Append("host:edge\n");
-            buf.Append("\n");
-            buf.Append("\0");
+                // stomp 연결
+                var buf = new StringBuilder();
 
-            ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+                buf.Append("CONNECT\n");
+                buf.Append("content-length:0\n");
+                buf.Append("accept-version:1.2\n");
+                buf.Append("host:edge\n");
+                buf.Append("\n");
+                buf.Append("\0");
+
+                ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+            });
         }
 
-        public void subscribSync(string destination)
+        public void subscribeSync(string destination)
         {
-            var buf = new StringBuilder();
+            wrapingFunc(() => {
+                var buf = new StringBuilder();
 
-            buf.Append("SUBSCRIBE\n");
-            buf.Append("content-length:0\n");
-            buf.Append($"id:sub-{uuid}\n");
-            buf.Append($"destination:{destination}\n");
-            buf.Append("\n");
-            buf.Append("\0");
+                buf.Append("SUBSCRIBE\n");
+                buf.Append("content-length:0\n");
+                buf.Append($"id:sub-{uuid}\n");
+                buf.Append($"destination:{destination}\n");
+                buf.Append("\n");
+                buf.Append("\0");
 
-            ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+                ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+            });
         }
 
         public void sendSync(string destination, string message)
         {
-            var buf = new StringBuilder();
+            wrapingFunc(()=> {
+                var buf = new StringBuilder();
 
-            buf.Append("SEND\n");
-            buf.Append($"content-length:{message.Length}\n");
-            buf.Append($"destination:{destination}\n");
-            buf.Append("\n");
-            buf.Append(message);
-            buf.Append("\0");
+                buf.Append("SEND\n");
+                buf.Append($"content-length:{Encoding.UTF8.GetByteCount(message)}\n");
+                buf.Append($"destination:{destination}\n");
+                buf.Append("\n");
+                buf.Append(message);
+                buf.Append("\0");
 
-            ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+                ws.SendAsync(Encoding.UTF8.GetBytes(buf.ToString()), WebSocketMessageType.Text, true, cts.Token).Wait(timeout);
+            });
         }
         #endregion
 
         #region ★ 비동기 실행
-        public void connectAsync(Uri uri)
+        public void connectAsync(string url)
         {
             Task.Run(() => {
-                connectSync(uri);
+                connectSync(url);
             });
         }
 
-        public void subscribAsync(string destination)
+        public void subscribeAsync(string destination)
         {
             Task.Run(() => {
-                subscribSync(destination);
+                subscribeSync(destination);
             });
         }
 
@@ -133,30 +182,41 @@ namespace webSocketTestConsole
         #endregion
 
         #region ★ 이벤트
-        public async void onMessage(Action<string, string> callback)
+        public void onMessage(Action<string, string, Exception> callback)
         {
-            string result = "";
-            byte[] receiveMsg = new byte[1];
-
-            while (true)
-            {
-                await ws.ReceiveAsync(receiveMsg, cts.Token);
-                var character = Encoding.Default.GetString(receiveMsg);
-
-                result += character;
-
-                if (character == "\0")
+            Task.Run(async () => {
+                try
                 {
-                    var splitResult = result.Split('\n');
-                    var data = splitResult[splitResult.Length - 1];
-                    var header = "";
-                    for (var i = 0; i < splitResult.Length - 1; i++)
-                        header += $"{splitResult[i]}\n";
+                    List<byte> result = new List<byte>();
+                    byte[] receiveMsg = new byte[1];
 
-                    callback(header, data);
-                    result = "";
+                    while (true)
+                    {
+                        await ws.ReceiveAsync(receiveMsg, cts.Token);
+                        result.Add(receiveMsg[0]);
+
+                        var character = Encoding.Default.GetString(receiveMsg);
+                        if (character == "\0")
+                        {
+                            var resultText = Encoding.Default.GetString(result.ToArray());
+
+                            var splitResult = resultText.Split('\n');
+                            var data = splitResult[splitResult.Length - 1];
+                            var header = "";
+                            for (var i = 0; i < splitResult.Length - 1; i++)
+                                header += $"{splitResult[i]}\n";
+
+                            callback(header, data, null);
+                            result.Clear();
+                        }
+                    }
                 }
-            }
+                catch (TaskCanceledException) { }
+                catch (Exception e)
+                {
+                    callback(null, null, e);
+                }
+            });
         }
         #endregion
     }
